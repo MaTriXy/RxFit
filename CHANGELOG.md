@@ -1,13 +1,7 @@
 # Changelog
 
-## Version 1.1.1
+## Version 2.0.1
 
-* Fix for multiple subscribers on RxFit Observables.
-* Fixed bug which did not handle Exceptions after successful resolution.
-* Added RxFit.OnExceptionResumeNext Transformer.
-
-## Version 1.1.0
-
-* BREAKING CHANGE: Removed PermissionRequiredException in favor of SecurityException
-* Added `RxFit.checkConnection()` Completable.
-* Timeouts can now be provided when creating an Observable. Also, a global default timeout for all Fit API requests made through the lib can be set.
+* Add consumer ProGuard rules.
+* Add possibility to disable the automatic handling of resolutions, by passing a boolean parameter when creating an RxFit instance.
+* Update RxJava (2.0.1) and Google Play Services (10.0.0).

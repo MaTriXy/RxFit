@@ -9,22 +9,14 @@ import android.support.annotation.NonNull;
 import com.google.android.gms.common.ConnectionResult;
 import com.google.android.gms.common.api.Api;
 import com.google.android.gms.common.api.GoogleApiClient;
-import com.google.android.gms.common.api.PendingResult;
-import com.google.android.gms.common.api.Result;
-import com.google.android.gms.common.api.ResultCallback;
 import com.google.android.gms.common.api.Scope;
 
-import java.util.HashMap;
-import java.util.HashSet;
 import java.util.Map;
-import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
-import rx.Observable;
-import rx.Observer;
-import rx.Subscriber;
-import rx.functions.Action0;
-import rx.subscriptions.Subscriptions;
+import io.reactivex.ObservableEmitter;
+import io.reactivex.ObservableOnSubscribe;
 
 /* Copyright (C) 2015 Michał Charmas (http://blog.charmas.pl)
  *
@@ -45,54 +37,22 @@ import rx.subscriptions.Subscriptions;
  * FILE MODIFIED by Patrick Löwenstein, 2016
  *
  */
-public abstract class BaseObservable<T> implements Observable.OnSubscribe<T> {
-    private static final Set<BaseObservable> observableSet = new HashSet<>();
+abstract class BaseObservable<T> extends BaseRx<T> implements ObservableOnSubscribe<T> {
 
-    private final Context ctx;
-    private final Api<? extends Api.ApiOptions.NotRequiredOptions>[] services;
-    private final Scope[] scopes;
-    private final boolean handleResolution;
-    private final Long timeoutTime;
-    private final TimeUnit timeoutUnit;
-
-    private final HashMap<GoogleApiClient, Subscriber<? super T>> subscriptionInfoHashMap = new HashMap<>();
+    private final Map<GoogleApiClient, ObservableEmitter<T>> subscriptionInfoMap = new ConcurrentHashMap<>();
 
     protected BaseObservable(@NonNull RxFit rxFit, Long timeout, TimeUnit timeUnit) {
-        this.ctx = rxFit.getContext();
-        this.services = rxFit.getApis();
-        this.scopes = rxFit.getScopes();
-        handleResolution = true;
-
-        if(timeout != null && timeUnit != null) {
-            this.timeoutTime = timeout;
-            this.timeoutUnit = timeUnit;
-        } else {
-            this.timeoutTime = RxFit.getDefaultTimeout();
-            this.timeoutUnit = RxFit.getDefaultTimeoutUnit();
-        }
+        super(rxFit, timeout, timeUnit);
     }
 
     protected BaseObservable(@NonNull Context ctx, @NonNull Api<? extends Api.ApiOptions.NotRequiredOptions>[] services, Scope[] scopes) {
-        this.ctx = ctx;
-        this.services = services;
-        this.scopes = scopes;
-        handleResolution = false;
-        timeoutTime = null;
-        timeoutUnit = null;
-    }
-
-    protected final <T extends Result> void setupFitnessPendingResult(PendingResult<T> pendingResult, ResultCallback<? super T> resultCallback) {
-        if(timeoutTime != null && timeoutUnit != null) {
-            pendingResult.setResultCallback(resultCallback, timeoutTime, timeoutUnit);
-        } else {
-            pendingResult.setResultCallback(resultCallback);
-        }
+        super(ctx, services, scopes);
     }
 
     @Override
-    public final void call(Subscriber<? super T> subscriber) {
-        final GoogleApiClient apiClient = createApiClient(subscriber);
-        subscriptionInfoHashMap.put(apiClient, subscriber);
+    public final void subscribe(ObservableEmitter<T> subscriber) throws Exception {
+        final GoogleApiClient apiClient = createApiClient(new ApiClientConnectionCallbacks(subscriber));
+        subscriptionInfoMap.put(apiClient, subscriber);
 
         try {
             apiClient.connect();
@@ -100,76 +60,56 @@ public abstract class BaseObservable<T> implements Observable.OnSubscribe<T> {
             subscriber.onError(ex);
         }
 
-        subscriber.add(Subscriptions.create(new Action0() {
-            @Override
-            public void call() {
-                if (apiClient.isConnected() || apiClient.isConnecting()) {
-                    onUnsubscribed(apiClient);
-                    apiClient.disconnect();
+        subscriber.setCancellable(() -> {
+            if (apiClient.isConnected() || apiClient.isConnecting()) {
+                onUnsubscribed(apiClient);
+                apiClient.disconnect();
+            }
+
+            subscriptionInfoMap.remove(apiClient);
+        });
+    }
+
+    protected abstract void onGoogleApiClientReady(GoogleApiClient apiClient, ObservableEmitter<T> subscriber);
+
+    protected final void handleResolutionResult(int resultCode, ConnectionResult connectionResult) {
+        for (Map.Entry<GoogleApiClient, ObservableEmitter<T>> entry : subscriptionInfoMap.entrySet()) {
+            if (!entry.getValue().isDisposed()) {
+                if (resultCode == Activity.RESULT_OK) {
+                    try {
+                        entry.getKey().connect();
+                    } catch (Throwable ex) {
+                        entry.getValue().onError(ex);
+                    }
+                } else {
+                    entry.getValue().onError(new GoogleAPIConnectionException("Error connecting to GoogleApiClient, resolution was not successful.", connectionResult));
                 }
-
-                subscriptionInfoHashMap.remove(apiClient);
-            }
-        }));
-    }
-
-
-    GoogleApiClient createApiClient(Subscriber<? super T> subscriber) {
-
-        ApiClientConnectionCallbacks apiClientConnectionCallbacks = new ApiClientConnectionCallbacks(subscriber);
-
-        GoogleApiClient.Builder apiClientBuilder = new GoogleApiClient.Builder(ctx);
-
-
-        for (Api<? extends Api.ApiOptions.NotRequiredOptions> service : services) {
-            apiClientBuilder.addApi(service);
-        }
-
-        if(scopes != null) {
-            for (Scope scope : scopes) {
-                apiClientBuilder.addScope(scope);
             }
         }
-
-        apiClientBuilder.addConnectionCallbacks(apiClientConnectionCallbacks);
-        apiClientBuilder.addOnConnectionFailedListener(apiClientConnectionCallbacks);
-
-        GoogleApiClient apiClient = apiClientBuilder.build();
-
-        apiClientConnectionCallbacks.setClient(apiClient);
-
-        return apiClient;
-
     }
 
-    protected void onUnsubscribed(GoogleApiClient locationClient) { }
+    protected class ApiClientConnectionCallbacks extends BaseRx.ApiClientConnectionCallbacks {
 
-    protected abstract void onGoogleApiClientReady(GoogleApiClient apiClient, Observer<? super T> observer);
-
-    private class ApiClientConnectionCallbacks implements
-            GoogleApiClient.ConnectionCallbacks,
-            GoogleApiClient.OnConnectionFailedListener {
-
-        final private Observer<? super T> observer;
+        final protected ObservableEmitter<T> subscriber;
 
         private GoogleApiClient apiClient;
 
-        private ApiClientConnectionCallbacks(Observer<? super T> observer) {
-            this.observer = observer;
+        private ApiClientConnectionCallbacks(ObservableEmitter<T> subscriber) {
+            this.subscriber = subscriber;
         }
 
         @Override
         public void onConnected(Bundle bundle) {
             try {
-                onGoogleApiClientReady(apiClient, observer);
+                onGoogleApiClientReady(apiClient, subscriber);
             } catch (Throwable ex) {
-                observer.onError(ex);
+                subscriber.onError(ex);
             }
         }
 
         @Override
         public void onConnectionSuspended(int cause) {
-            observer.onError(new GoogleAPIConnectionSuspendedException(cause));
+            subscriber.onError(new GoogleAPIConnectionSuspendedException(cause));
         }
 
         @Override
@@ -184,32 +124,12 @@ public abstract class BaseObservable<T> implements Observable.OnSubscribe<T> {
                     ctx.startActivity(intent);
                 }
             } else {
-                observer.onError(new GoogleAPIConnectionException("Error connecting to GoogleApiClient.", connectionResult));
+                subscriber.onError(new GoogleAPIConnectionException("Error connecting to GoogleApiClient.", connectionResult));
             }
         }
 
         public void setClient(GoogleApiClient client) {
             this.apiClient = client;
         }
-    }
-
-    static void onResolutionResult(int resultCode, ConnectionResult connectionResult) {
-        for(BaseObservable observable : observableSet) {
-            for (Map.Entry<GoogleApiClient, Subscriber> entry : (Set<Map.Entry<GoogleApiClient, Subscriber>>) observable.subscriptionInfoHashMap.entrySet()) {
-                if (!entry.getValue().isUnsubscribed()) {
-                    if (resultCode == Activity.RESULT_OK) {
-                        try {
-                            entry.getKey().connect();
-                        } catch (Throwable ex) {
-                            entry.getValue().onError(ex);
-                        }
-                    } else {
-                        entry.getValue().onError(new GoogleAPIConnectionException("Error connecting to GoogleApiClient, resolution was not successful.", connectionResult));
-                    }
-                }
-            }
-        }
-
-        observableSet.clear();
     }
 }
